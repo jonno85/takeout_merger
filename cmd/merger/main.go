@@ -12,11 +12,13 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/jonathan/takeout-merger/internal/extract"
+	"github.com/jonathan/takeout-merger/internal/merge"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	log.SetFlags(log.Ltime)
@@ -80,17 +82,26 @@ func cmdExtract(args []string) {
 
 func cmdMerge(args []string) {
 	fs := flag.NewFlagSet("merge", flag.ExitOnError)
-	input := fs.String("input", "", "staging directory produced by 'merger extract'")
-	output := fs.String("output", "", "library output directory (e.g. /volume1/photo)")
-	state := fs.String("state", "", "state directory (SQLite database)")
-	fs.Bool("dry-run", false, "plan only, write nothing")
-	fs.Bool("keep-originals", false, "also keep originals superseded by their edited version")
-	fs.Int("workers", 2, "parallel workers")
+	var opts merge.Options
+	fs.StringVar(&opts.Input, "input", "", "staging directory produced by 'merger extract' (required)")
+	fs.StringVar(&opts.Output, "output", "", "library output directory, e.g. /volume1/photo (required)")
+	stateDir := fs.String("state", "", "state directory for the merge journal (default: <output>/.merger)")
+	fs.BoolVar(&opts.DryRun, "dry-run", false, "plan only, write nothing")
+	fs.BoolVar(&opts.KeepOriginals, "keep-originals", false, "also keep originals superseded by their edited version")
+	fs.IntVar(&opts.Workers, "workers", 2, "parallel workers (2 is right for the DS220+)")
+	fs.StringVar(&opts.ExiftoolBin, "exiftool", "exiftool", "exiftool binary path, or 'none' to skip metadata embedding")
 	_ = fs.Parse(args)
-	_ = input
-	_ = output
-	_ = state
 
-	fmt.Fprintln(os.Stderr, "merge: not implemented yet (step 2 — scanner/matcher/dedup/exiftool writer)")
-	os.Exit(2)
+	if opts.Input == "" || opts.Output == "" {
+		fs.Usage()
+		os.Exit(2)
+	}
+	if *stateDir == "" {
+		*stateDir = filepath.Join(opts.Output, ".merger")
+	}
+	opts.StatePath = filepath.Join(*stateDir, "merge.state.jsonl")
+
+	if _, err := merge.Run(opts); err != nil {
+		log.Fatalf("merge: %v", err)
+	}
 }

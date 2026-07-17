@@ -11,7 +11,7 @@ deduplication and incremental re-runs.
 
 ```
 step 1  merger extract   .tgz archives ──▶ staging tree      [IMPLEMENTED]
-step 2  merger merge     staging tree  ──▶ library + albums  [WIP]
+step 2  merger merge     staging tree  ──▶ library + albums  [IMPLEMENTED]
 ```
 
 Each step is separate and resumable. Future Takeout rounds: drop the new
@@ -38,18 +38,32 @@ merger extract --archives DIR --staging DIR [--state DIR] [--dry-run] [--delete-
 Disk math for a 120 GB export: archives (120) + staging (~120) must fit
 simultaneously; add the merged library (~110) if you keep everything.
 
-### Step 2 — merge (design, WIP)
+### Step 2 — merge
 
-* Scan staging, pair JSON sidecars with media (`internal/matcher`, all naming
-  quirks unit-tested), parse metadata (`internal/takeout`).
-* Dedup by content hash; canonical file goes to `library/YYYY/MM/`.
-* Near-duplicates: the **edited** version (`-edited` / `-modificato`) wins and
-  inherits the original's sidecar metadata; `--keep-originals` to keep both.
-* Albums (folders with `metadata.json`) become **hardlinks** under
-  `albums/<Title>/` — zero extra space, indexed by Synology Photos.
-* EXIF/QuickTime metadata written with **ExifTool in `-stay_open` batch mode**
-  (dates, GPS, description) — including HEIC/MP4, which Synology Photos reads.
-* SQLite state → incremental future rounds skip ~everything already imported.
+```
+merger merge --input DIR --output DIR [--state DIR] [--dry-run] [--keep-originals] [--workers N] [--exiftool PATH|none]
+```
+
+* Pairs JSON sidecars with media (`internal/matcher`: supplemental-metadata
+  naming, 46-char truncation, `(N)` duplicate index relocation,
+  `-edited`/`-modificato`, cross-root fallback — all unit-tested).
+* Dedup by content hash (SHA-256); the canonical file goes to
+  `library/YYYY/MM/` (UTC taken time; `library/undated/` without one).
+* Near-duplicates: the **edited** version wins under the original's name and
+  inherits the original's sidecar; `--keep-originals` keeps both.
+* Live Photos: the video half borrows the photo's sidecar (same stem).
+* Albums (folders with `metadata.json` / `metadati.json`) become **hardlinks**
+  under `albums/<Title>/` — zero extra space. Links are created only after all
+  metadata writes finished (ExifTool replaces files by rename, which would
+  otherwise orphan early links).
+* EXIF/QuickTime metadata written via **ExifTool `-stay_open` batch mode**:
+  DateTimeOriginal/CreateDate + GPS + description for images,
+  QuickTime:CreateDate (UTC) + Keys:GPSCoordinates + description for videos.
+  One ExifTool process per worker. Metadata failures never lose files —
+  they are counted and logged, the copy stays.
+* State journal (`merge.state.jsonl`, append-only JSON-lines): re-runs and
+  **future Takeout rounds** skip everything already imported; interrupted runs
+  resume. Human-readable — `grep` it to answer "why was this skipped?".
 
 ## Development (Mac)
 
@@ -79,8 +93,9 @@ appear in the mobile app's *Folders* tab.
 
 ## Configuration notes
 
-* Go 1.26, pure stdlib so far (SQLite lands in step 2 via `modernc.org/sqlite`,
-  CGO-free).
+* Go 1.26, pure stdlib — no external dependencies at all. State is an
+  append-only JSONL journal (a few MB for 50k files); swap in SQLite later
+  only if you ever need ad-hoc querying.
 * Matcher tunables (`internal/matcher.DefaultConfig`): metadata suffix names,
   localized edited suffixes, 46-char truncation cap. Verify against your real
   export with:
