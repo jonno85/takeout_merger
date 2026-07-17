@@ -1,0 +1,34 @@
+# Deployment on the Synology DS220+ (Container Manager).
+# Adjust the left-hand host paths to your volume layout.
+#
+# Step 1 (this release):    docker compose run --rm extract
+# Step 2 (when implemented): docker compose run --rm merge
+services:
+  extract:
+    image: takeout-merger:latest
+    command:
+      - extract
+      - --archives=/archives
+      - --staging=/staging
+      - --state=/state
+    volumes:
+      - /volume1/photos/takeout-archives:/archives      # your .tgz files (rw if --delete-archives)
+      - /volume1/photos/staging:/staging
+      - /volume1/photos/.merger-state:/state
+    mem_limit: 256m
+    cpus: 2
+
+  merge:
+    image: takeout-merger:latest
+    command:
+      - merge
+      - --input=/staging
+      - --output=/output
+      - --state=/state
+      - --workers=2
+    volumes:
+      - /volume1/photos/staging:/staging:ro
+      - /volume1/photo:/output                          # Synology Photos Shared Space
+      - /volume1/photos/.merger-state:/state
+    mem_limit: 512m
+    cpus: 2
