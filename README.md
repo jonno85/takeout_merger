@@ -3,10 +3,6 @@
 Migrates Google Photos Takeout exports into a clean, metadata-complete photo
 library for **Synology Photos** (DS220+, Docker/Container Manager).
 
-Reference for requirements: [SKocur/google-photos-takeout-metadata-merger](https://github.com/SKocur/google-photos-takeout-metadata-merger),
-reimplemented headless with extraction, real EXIF for HEIC/MP4 (via ExifTool),
-deduplication and incremental re-runs.
-
 ## Pipeline
 
 ```
@@ -61,8 +57,8 @@ merger merge --input DIR --output DIR [--state DIR] [--dry-run] [--keep-original
   26k export!), and MKV under `.mp4`. Sibling containers (mov/mp4, mkv/webm)
   are never churned; unknown extensions are never touched.
 * `--repair`: when a write fails because the file's *original* EXIF structure
-  is corrupt ("Error reading OtherImageStart data"), rebuild the metadata
-  structure from scratch and retry.
+  is corrupt ("Error reading OtherImageStart data"), the metadata structure
+  is rebuilt from scratch and the write retried.
 * EXIF/QuickTime metadata written via **ExifTool `-stay_open` batch mode**:
   DateTimeOriginal/CreateDate + GPS + description for images,
   QuickTime:CreateDate (UTC) + Keys:GPSCoordinates + description for mp4/mov,
@@ -70,15 +66,6 @@ merger merge --input DIR --output DIR [--state DIR] [--dry-run] [--keep-original
   (AVI/MPEG/WMV/MKV/...) keep filesystem dates without noisy errors.
   One ExifTool process per worker. Metadata failures never lose files —
   they are counted and logged, the copy stays.
-* Content sniffing: extensions that lie about the format are corrected from
-  magic bytes (Google "storage saver" ships JPEG bytes as `.HEIC`; some MKVs
-  masquerade as `.mp4`). Sibling containers (mov/mp4, mkv/webm) are never
-  churned. Unwritable containers (AVI, MPG, WMV, MKV, ...) skip the metadata
-  attempt; GIF/WebP get XMP tags since they have no EXIF segment.
-* `--repair`: when a file's own EXIF is corrupt ("Error reading
-  OtherImageStart data"), rebuild the metadata structure from scratch and
-  retry — recovers old-phone JPEGs at the cost of dropping their unreadable
-  maker notes.
 * State journal (`merge.state.jsonl`, append-only JSON-lines): re-runs and
   **future Takeout rounds** skip everything already imported; interrupted runs
   resume. Human-readable — `grep` it to answer "why was this skipped?".
@@ -98,16 +85,92 @@ the *current* naming conventions and your account's localization
 
 ## Deployment (Synology)
 
+The Docker image must be built for the Synology NAS architecture before being
+transferred. Build the image on your Mac rather than on the NAS.
+
+### 1. Build the Docker image on your Mac
+
+```bash
+cd takeout-merger
+
+docker buildx build \
+  --platform linux/amd64 \
+  -t takeout-merger:latest \
+  .
+```
+
+Equivalent shortcut:
+
 ```bash
 make docker
-docker save takeout-merger:latest | ssh user@nas "docker load"
-# then on the NAS (adjust paths in docker-compose.yml):
+```
+
+### 2. Export the Docker image
+
+```bash
+docker save takeout-merger:latest -o takeout-merger.tar
+```
+
+Upload `takeout-merger.tar` to the Synology NAS and import it through
+**Container Manager → Image → Add → Add from file**.
+
+The imported `takeout-merger:latest` image is the image to use when creating
+the container in the Synology Container Manager UI.
+
+### 3. Configure the container volumes
+
+Create the following volume mappings in Container Manager:
+
+| Synology NAS path | Container path | Mode |
+|---|---|---|
+| `/volume1/docker/takeout_manager/staging` | `/staging` | Read-only |
+| `/volume1/docker/takeout_manager/.merger-state` | `/state` | Read-write |
+| `/volume1/docker/takeout_manager/output` | `/output` | Read-write |
+
+The resulting configuration should look like:
+
+```text
+/volume1/docker/takeout_manager/staging:/staging:ro
+/volume1/docker/takeout_manager/.merger-state:/state:rw
+/volume1/docker/takeout_manager/output:/output:rw
+```
+
+### 4. Run the extraction step
+
+The extraction step is resumable and safe to interrupt. Run:
+
+```bash
 docker compose run --rm extract
 ```
 
-Output target for the merge step is `/volume1/photo` (Synology Photos
-**Shared Space** — enable it in Synology Photos ▸ Settings). Folder albums
-appear in the mobile app's *Folders* tab.
+If using Container Manager's UI, run the container with the `extract` command.
+
+You can safely stop the process with `Ctrl-C` and run it again later.
+
+### 5. Run a merge dry-run
+
+After extraction, verify the staging tree and perform a dry-run:
+
+```bash
+docker compose run --rm merge \
+  merge \
+  --input=/staging \
+  --output=/output \
+  --state=/state \
+  --dry-run
+```
+
+### 6. Run the real merge
+
+Once the dry-run looks correct:
+
+```bash
+docker compose run --rm merge
+```
+
+The merge state is persisted in `/state`, so interrupted runs and future
+Takeout rounds can resume without reprocessing already-imported content.
+
 
 ## Configuration notes
 
