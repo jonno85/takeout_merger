@@ -381,11 +381,20 @@ func (m *merger) newWriter() (exiftool.Writer, error) {
 }
 
 func (m *merger) process(it *item, writer exiftool.Writer) error {
-	h, size, err := hashFile(it.src)
+	h, size, header, err := hashFile(it.src)
 	if err != nil {
 		return err
 	}
 	it.hash, it.size = h, size
+
+	// Google Photos "storage saver" transcodes HEIC->JPEG but Takeout keeps
+	// the .HEIC filename; exiftool then refuses to write ("Not a valid HEIC,
+	// looks more like a JPEG") and Synology Photos indexes it wrong. Detect
+	// the real format from magic bytes and correct the canonical extension.
+	if fixed, changed := correctedName(it.name, header); changed {
+		log.Printf("extension corrected: %s is really %s", it.name, filepath.Ext(fixed))
+		it.name = fixed
+	}
 
 	m.mu.Lock()
 	canonical, dup := m.canon[it.hash]
@@ -550,18 +559,72 @@ func (m *merger) count(f func(*Stats)) {
 // helpers
 // ---------------------------------------------------------------------------
 
-func hashFile(path string) (string, int64, error) {
+func hashFile(path string) (string, int64, []byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", 0, err
+		return "", 0, nil, err
 	}
 	defer f.Close()
+	header := make([]byte, 32)
+	hn, err := io.ReadFull(f, header)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return "", 0, nil, err
+	}
+	header = header[:hn]
 	h := sha256.New()
+	h.Write(header)
 	n, err := io.Copy(h, f)
 	if err != nil {
-		return "", 0, err
+		return "", 0, nil, err
 	}
-	return hex.EncodeToString(h.Sum(nil)), n, nil
+	return hex.EncodeToString(h.Sum(nil)), n + int64(hn), header, nil
+}
+
+// sniffExt detects the real image format from magic bytes; "" when unknown
+// or not one of the formats we care about.
+func sniffExt(header []byte) string {
+	switch {
+	case len(header) >= 3 && header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF:
+		return "jpg"
+	case len(header) >= 8 && string(header[:8]) == "\x89PNG\r\n\x1a\n":
+		return "png"
+	case len(header) >= 6 && (string(header[:6]) == "GIF87a" || string(header[:6]) == "GIF89a"):
+		return "gif"
+	case len(header) >= 12 && string(header[4:8]) == "ftyp":
+		switch string(header[8:12]) {
+		case "heic", "heix", "hevc", "hevx", "heim", "heis", "mif1", "msf1":
+			return "heic"
+		}
+	}
+	return ""
+}
+
+// correctedName fixes the extension when the content contradicts it. Only
+// still-image extensions are ever touched, and only when the sniffed format
+// is confidently known.
+func correctedName(name string, header []byte) (string, bool) {
+	real := sniffExt(header)
+	if real == "" {
+		return name, false
+	}
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))
+	var current string
+	switch ext {
+	case "jpg", "jpeg":
+		current = "jpg"
+	case "png":
+		current = "png"
+	case "gif":
+		current = "gif"
+	case "heic", "heif":
+		current = "heic"
+	default:
+		return name, false // never touch videos or unknown extensions
+	}
+	if current == real {
+		return name, false
+	}
+	return strings.TrimSuffix(name, filepath.Ext(name)) + "." + real, true
 }
 
 func copyFile(src, dst string) error {

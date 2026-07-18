@@ -75,9 +75,12 @@ func (t *Tool) Write(path string, m Meta) error {
 	if err != nil {
 		return err
 	}
-	if !strings.Contains(out, "1 image files updated") &&
-		!strings.Contains(out, "1 video files updated") &&
-		!strings.Contains(out, "1 files updated") {
+	// "updated" = tags written; "unchanged" = tags already had these exact
+	// values (common: iPhone HEIC/JPEG with intact camera EXIF). Both fine.
+	if !strings.Contains(out, "files updated") && !strings.Contains(out, "files unchanged") {
+		return fmt.Errorf("exiftool did not update %s: %s%s", path, strings.TrimSpace(out), t.stderr.Drain())
+	}
+	if strings.Contains(out, "0 image files updated") && !strings.Contains(out, "files unchanged") {
 		return fmt.Errorf("exiftool did not update %s: %s%s", path, strings.TrimSpace(out), t.stderr.Drain())
 	}
 	return nil
@@ -112,7 +115,13 @@ func (t *Tool) execute(args []string) (string, error) {
 }
 
 func buildArgs(path string, m Meta) []string {
-	video := isVideo(path)
+	kind := kindOf(path)
+	if kind == kindUnwritable {
+		// ExifTool cannot write these containers (AVI/MPEG/WMV/MKV/...).
+		// The file keeps its filesystem mtime; nothing else we can do.
+		return nil
+	}
+	video := kind == kindVideo
 
 	var args []string
 	add := func(a ...string) { args = append(args, a...) }
@@ -130,17 +139,28 @@ func buildArgs(path string, m Meta) []string {
 
 	if !m.TakenAt.IsZero() {
 		ts := m.TakenAt.UTC().Format("2006:01:02 15:04:05")
-		if video {
+		switch kind {
+		case kindVideo:
 			add("-QuickTime:CreateDate="+ts, "-QuickTime:ModifyDate="+ts)
-		} else {
+		case kindXMPOnly:
+			// GIF/WebP have no EXIF segment; XMP is the only home.
+			add("-XMP-exif:DateTimeOriginal="+ts, "-XMP-photoshop:DateCreated="+ts)
+		default:
 			add("-EXIF:DateTimeOriginal="+ts, "-EXIF:CreateDate="+ts)
 		}
 	}
 
 	if m.HasGeo {
-		if video {
+		switch kind {
+		case kindVideo:
 			add(fmt.Sprintf("-Keys:GPSCoordinates=%f, %f, %f", m.Lat, m.Lng, m.Alt))
-		} else {
+		case kindXMPOnly:
+			add(
+				fmt.Sprintf("-XMP-exif:GPSLatitude=%f", m.Lat),
+				fmt.Sprintf("-XMP-exif:GPSLongitude=%f", m.Lng),
+				fmt.Sprintf("-XMP-exif:GPSAltitude=%f", m.Alt),
+			)
+		default:
 			latRef, lngRef := "N", "E"
 			if m.Lat < 0 {
 				latRef = "S"
@@ -164,9 +184,12 @@ func buildArgs(path string, m Meta) []string {
 	}
 
 	if m.Description != "" {
-		if video {
+		switch kind {
+		case kindVideo:
 			add("-Keys:Description=" + m.Description)
-		} else {
+		case kindXMPOnly:
+			add("-XMP-dc:Description=" + m.Description)
+		default:
 			add("-EXIF:ImageDescription="+m.Description, "-XMP-dc:Description="+m.Description)
 		}
 	}
@@ -177,17 +200,32 @@ func buildArgs(path string, m Meta) []string {
 	return append(args, path)
 }
 
-func isVideo(path string) bool {
+type fileKind int
+
+const (
+	kindImage fileKind = iota
+	kindVideo
+	kindXMPOnly    // formats without an EXIF segment (GIF, WebP)
+	kindUnwritable // formats exiftool cannot write at all
+)
+
+func kindOf(path string) fileKind {
 	i := strings.LastIndex(path, ".")
 	if i < 0 {
-		return false
+		return kindImage
 	}
 	switch strings.ToLower(path[i+1:]) {
-	case "mp4", "mov", "m4v", "3gp", "avi", "mpg", "mpeg", "mts", "m2ts", "wmv", "mkv", "webm":
-		return true
+	case "mp4", "mov", "m4v", "3gp":
+		return kindVideo
+	case "gif", "webp":
+		return kindXMPOnly
+	case "avi", "mpg", "mpeg", "wmv", "mkv", "webm", "mts", "m2ts", "flv", "vob":
+		return kindUnwritable
 	}
-	return false
+	return kindImage
 }
+
+func isVideo(path string) bool { return kindOf(path) == kindVideo }
 
 func abs(f float64) float64 {
 	if f < 0 {

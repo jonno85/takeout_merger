@@ -182,6 +182,38 @@ func TestKeepOriginals(t *testing.T) {
 	}
 }
 
+func TestExtensionCorrection(t *testing.T) {
+	root := t.TempDir()
+	gp := filepath.Join(root, "Takeout", "Google Photos", "Photos from 2021")
+	if err := os.MkdirAll(gp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// JPEG magic bytes under a .HEIC name — the Google "storage saver" quirk.
+	jpegBytes := []byte{0xFF, 0xD8, 0xFF, 0xE0, 'f', 'a', 'k', 'e'}
+	os.WriteFile(filepath.Join(gp, "IMG_9411.HEIC"), jpegBytes, 0o644)
+	os.WriteFile(filepath.Join(gp, "IMG_9411.HEIC.supplemental-metadata.json"),
+		[]byte(`{"photoTakenTime":{"timestamp":"1631000000"}}`), 0o644)
+	// A true HEIC must keep its extension.
+	heicBytes := append([]byte{0, 0, 0, 24}, []byte("ftypheic")...)
+	os.WriteFile(filepath.Join(gp, "IMG_2000.HEIC"), append(heicBytes, 'x'), 0o644)
+	os.WriteFile(filepath.Join(gp, "IMG_2000.HEIC.supplemental-metadata.json"),
+		[]byte(`{"photoTakenTime":{"timestamp":"1631000000"}}`), 0o644)
+
+	o := opts(t, root)
+	if _, err := Run(o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(o.Output, "library/2021/09/IMG_9411.jpg")); err != nil {
+		t.Error("JPEG-in-HEIC not renamed to .jpg")
+	}
+	if _, err := os.Stat(filepath.Join(o.Output, "library/2021/09/IMG_9411.HEIC")); err == nil {
+		t.Error("lying .HEIC name must not survive")
+	}
+	if _, err := os.Stat(filepath.Join(o.Output, "library/2021/09/IMG_2000.HEIC")); err != nil {
+		t.Error("genuine HEIC extension must be preserved")
+	}
+}
+
 func TestNameCollisionDifferentContent(t *testing.T) {
 	root := t.TempDir()
 	gp := filepath.Join(root, "Takeout", "Google Photos")
