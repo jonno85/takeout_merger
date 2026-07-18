@@ -18,7 +18,7 @@ import (
 	"github.com/jonathan/takeout-merger/internal/merge"
 )
 
-const version = "0.2.2"
+const version = "0.2.3"
 
 func main() {
 	log.SetFlags(log.Ltime)
@@ -88,6 +88,7 @@ func cmdMerge(args []string) {
 	stateDir := fs.String("state", "", "state directory for the merge journal (default: <output>/.merger)")
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "plan only, write nothing")
 	fs.BoolVar(&opts.KeepOriginals, "keep-originals", false, "also keep originals superseded by their edited version")
+	fs.BoolVar(&opts.Repair, "repair", false, "on metadata write failure, rebuild the file's corrupt EXIF structure and retry")
 	fs.IntVar(&opts.Workers, "workers", 2, "parallel workers (2 is right for the DS220+)")
 	fs.StringVar(&opts.ExiftoolBin, "exiftool", "exiftool", "exiftool binary path, or 'none' to skip metadata embedding")
 	_ = fs.Parse(args)

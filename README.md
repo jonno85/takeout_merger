@@ -41,7 +41,7 @@ simultaneously; add the merged library (~110) if you keep everything.
 ### Step 2 — merge
 
 ```
-merger merge --input DIR --output DIR [--state DIR] [--dry-run] [--keep-originals] [--workers N] [--exiftool PATH|none]
+merger merge --input DIR --output DIR [--state DIR] [--dry-run] [--keep-originals] [--repair] [--workers N] [--exiftool PATH|none]
 ```
 
 * Pairs JSON sidecars with media (`internal/matcher`: supplemental-metadata
@@ -56,11 +56,29 @@ merger merge --input DIR --output DIR [--state DIR] [--dry-run] [--keep-original
   under `albums/<Title>/` — zero extra space. Links are created only after all
   metadata writes finished (ExifTool replaces files by rename, which would
   otherwise orphan early links).
+* **Content sniffing** corrects lying extensions from magic bytes: Google's
+  storage-saver stores JPEG bytes under `.HEIC` names (1132 files in a real
+  26k export!), and MKV under `.mp4`. Sibling containers (mov/mp4, mkv/webm)
+  are never churned; unknown extensions are never touched.
+* `--repair`: when a write fails because the file's *original* EXIF structure
+  is corrupt ("Error reading OtherImageStart data"), rebuild the metadata
+  structure from scratch and retry.
 * EXIF/QuickTime metadata written via **ExifTool `-stay_open` batch mode**:
   DateTimeOriginal/CreateDate + GPS + description for images,
-  QuickTime:CreateDate (UTC) + Keys:GPSCoordinates + description for videos.
+  QuickTime:CreateDate (UTC) + Keys:GPSCoordinates + description for mp4/mov,
+  XMP for GIF/WebP (no EXIF segment exists there); unwritable containers
+  (AVI/MPEG/WMV/MKV/...) keep filesystem dates without noisy errors.
   One ExifTool process per worker. Metadata failures never lose files —
   they are counted and logged, the copy stays.
+* Content sniffing: extensions that lie about the format are corrected from
+  magic bytes (Google "storage saver" ships JPEG bytes as `.HEIC`; some MKVs
+  masquerade as `.mp4`). Sibling containers (mov/mp4, mkv/webm) are never
+  churned. Unwritable containers (AVI, MPG, WMV, MKV, ...) skip the metadata
+  attempt; GIF/WebP get XMP tags since they have no EXIF segment.
+* `--repair`: when a file's own EXIF is corrupt ("Error reading
+  OtherImageStart data"), rebuild the metadata structure from scratch and
+  retry — recovers old-phone JPEGs at the cost of dropping their unreadable
+  maker notes.
 * State journal (`merge.state.jsonl`, append-only JSON-lines): re-runs and
   **future Takeout rounds** skip everything already imported; interrupted runs
   resume. Human-readable — `grep` it to answer "why was this skipped?".

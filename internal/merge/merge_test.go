@@ -214,6 +214,37 @@ func TestExtensionCorrection(t *testing.T) {
 	}
 }
 
+func TestCorrectedNameRules(t *testing.T) {
+	jpeg := []byte{0xFF, 0xD8, 0xFF, 0xE0}
+	ebml := []byte{0x1A, 0x45, 0xDF, 0xA3, 0, 0, 0, 0}
+	avi := append([]byte("RIFF"), append([]byte{0, 0, 0, 0}, []byte("AVI ")...)...)
+	mp4 := append([]byte{0, 0, 0, 24}, []byte("ftypisom")...)
+	mov := append([]byte{0, 0, 0, 24}, []byte("ftypqt  ")...)
+
+	tests := []struct {
+		name    string
+		header  []byte
+		want    string
+		changed bool
+	}{
+		{"IMG.HEIC", jpeg, "IMG.jpg", true},                // the Google quirk
+		{"clip.mp4", ebml, "clip.mkv", true},               // MKV in .mp4 clothing
+		{"clip.webm", ebml, "clip.webm", false},            // same EBML group: no churn
+		{"clip.mov", mp4, "clip.mov", false},               // mp4-family siblings: no churn
+		{"clip.mp4", mov, "clip.mp4", false},               // ditto, other direction
+		{"old.mov", avi, "old.avi", true},                  // genuine AVI mislabeled
+		{"readme.txt", jpeg, "readme.txt", false},          // unknown ext: never touch
+		{"data.bin", ebml, "data.bin", false},              // ditto
+		{"photo.jpg", []byte{1, 2, 3}, "photo.jpg", false}, // unknown content: never touch
+	}
+	for _, tt := range tests {
+		got, changed := correctedName(tt.name, tt.header)
+		if got != tt.want || changed != tt.changed {
+			t.Errorf("correctedName(%q) = (%q,%v), want (%q,%v)", tt.name, got, changed, tt.want, tt.changed)
+		}
+	}
+}
+
 func TestNameCollisionDifferentContent(t *testing.T) {
 	root := t.TempDir()
 	gp := filepath.Join(root, "Takeout", "Google Photos")

@@ -27,6 +27,8 @@ type Meta struct {
 // Writer is what the merge step needs; *Tool implements it. Tests use fakes.
 type Writer interface {
 	Write(path string, m Meta) error
+	// Repair rebuilds corrupt metadata structures, then writes m.
+	Repair(path string, m Meta) error
 	Close() error
 }
 
@@ -83,7 +85,31 @@ func (t *Tool) Write(path string, m Meta) error {
 	if strings.Contains(out, "0 image files updated") && !strings.Contains(out, "files unchanged") {
 		return fmt.Errorf("exiftool did not update %s: %s%s", path, strings.TrimSpace(out), t.stderr.Drain())
 	}
+	// Success: discard accumulated warnings (e.g. "Duplicate MakerNoteUnknown
+	// tag") so they don't pollute a later, unrelated error message.
+	_ = t.stderr.Drain()
 	return nil
+}
+
+// Repair rebuilds a file's metadata structure from scratch and then writes m.
+// This recovers files whose original EXIF is corrupt (e.g. "Error reading
+// OtherImageStart data"): all tags are copied into a freshly built structure,
+// dropping only the unreadable parts.
+func (t *Tool) Repair(path string, m Meta) error {
+	out, err := t.execute([]string{
+		"-charset", "filename=UTF8",
+		"-overwrite_original", "-m",
+		"-all=", "-tagsfromfile", "@", "-all:all", "-unsafe", "-icc_profile",
+		path,
+	})
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(out, "files updated") {
+		return fmt.Errorf("exiftool could not rebuild %s: %s%s", path, strings.TrimSpace(out), t.stderr.Drain())
+	}
+	_ = t.stderr.Drain()
+	return t.Write(path, m)
 }
 
 // execute sends one command (args + -execute) and reads until {ready}.

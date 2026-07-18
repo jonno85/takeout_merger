@@ -36,6 +36,7 @@ type Options struct {
 	StatePath      string // JSONL journal file
 	DryRun         bool
 	KeepOriginals  bool // keep originals superseded by their edited version
+	Repair         bool // rebuild corrupt metadata structures on write failure
 	Workers        int
 	ExiftoolBin    string // "" or "none" disables metadata writing
 	Matcher        matcher.Config
@@ -53,6 +54,7 @@ type Stats struct {
 	NoSidecar     int
 	UnmatchedJSON int
 	MetaErrors    int
+	Repaired      int
 }
 
 type item struct {
@@ -120,8 +122,8 @@ func Run(opts Options) (Stats, error) {
 		return st, err
 	}
 
-	log.Printf("merge%s: %d new, %d duplicate(s), %d superseded by edited, %d album link(s) in %d album(s), %d without sidecar, %d unmatched JSON, %d metadata error(s)",
-		dryTag(opts.DryRun), st.NewFiles, st.Duplicates, st.Superseded, st.AlbumLinks, st.Albums, st.NoSidecar, st.UnmatchedJSON, st.MetaErrors)
+	log.Printf("merge%s: %d new, %d duplicate(s), %d superseded by edited, %d album link(s) in %d album(s), %d without sidecar, %d unmatched JSON, %d repaired, %d metadata error(s)",
+		dryTag(opts.DryRun), st.NewFiles, st.Duplicates, st.Superseded, st.AlbumLinks, st.Albums, st.NoSidecar, st.UnmatchedJSON, st.Repaired, st.MetaErrors)
 	return st, nil
 }
 
@@ -430,10 +432,22 @@ func (m *merger) process(it *item, writer exiftool.Writer) error {
 		meta, taken := metaFor(it)
 		if writer != nil {
 			if err := writer.Write(dst, meta); err != nil {
-				// Metadata failure must not lose the file: keep the copy,
-				// count the error, continue. (Filesystem mtime still set.)
-				log.Printf("warning: metadata write failed for %s: %v", canonical, err)
-				m.count(func(s *Stats) { s.MetaErrors++ })
+				repaired := false
+				if m.opts.Repair {
+					if rerr := writer.Repair(dst, meta); rerr == nil {
+						repaired = true
+						log.Printf("repaired corrupt metadata: %s", canonical)
+						m.count(func(s *Stats) { s.Repaired++ })
+					} else {
+						log.Printf("warning: repair also failed for %s: %v", canonical, rerr)
+					}
+				}
+				if !repaired {
+					// Metadata failure must not lose the file: keep the copy,
+					// count the error, continue. (Filesystem mtime still set.)
+					log.Printf("warning: metadata write failed for %s: %v", canonical, err)
+					m.count(func(s *Stats) { s.MetaErrors++ })
+				}
 			}
 		}
 		if !taken.IsZero() {
@@ -580,8 +594,9 @@ func hashFile(path string) (string, int64, []byte, error) {
 	return hex.EncodeToString(h.Sum(nil)), n + int64(hn), header, nil
 }
 
-// sniffExt detects the real image format from magic bytes; "" when unknown
-// or not one of the formats we care about.
+// sniffExt detects the real format from magic bytes; "" when unknown or not
+// one of the formats we care about. Video containers included: the same
+// lying-extension disease exists there (.mp4 files that are really MKV).
 func sniffExt(header []byte) string {
 	switch {
 	case len(header) >= 3 && header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF:
@@ -590,38 +605,56 @@ func sniffExt(header []byte) string {
 		return "png"
 	case len(header) >= 6 && (string(header[:6]) == "GIF87a" || string(header[:6]) == "GIF89a"):
 		return "gif"
+	case len(header) >= 4 && header[0] == 0x1A && header[1] == 0x45 && header[2] == 0xDF && header[3] == 0xA3:
+		return "mkv" // EBML: Matroska or WebM (indistinguishable this shallow)
+	case len(header) >= 12 && string(header[:4]) == "RIFF" && string(header[8:12]) == "AVI ":
+		return "avi"
 	case len(header) >= 12 && string(header[4:8]) == "ftyp":
-		switch string(header[8:12]) {
+		brand := string(header[8:12])
+		switch brand {
 		case "heic", "heix", "hevc", "hevx", "heim", "heis", "mif1", "msf1":
 			return "heic"
+		case "qt  ":
+			return "mov"
+		default:
+			// isom, iso2, mp41, mp42, mp4v, avc1, M4V , 3gp*, ...
+			return "mp4"
 		}
 	}
 	return ""
 }
 
+// extGroups: extensions that are interchangeable enough that a sniff result
+// in the same group must NOT trigger a rename (mov vs mp4, mkv vs webm).
+var extGroups = map[string]string{
+	"jpg": "jpg", "jpeg": "jpg",
+	"png":  "png",
+	"gif":  "gif",
+	"heic": "heic", "heif": "heic",
+	"mp4": "mp4family", "m4v": "mp4family", "mov": "mp4family", "3gp": "mp4family",
+	"mkv": "ebml", "webm": "ebml",
+	"avi": "avi",
+}
+
+var sniffGroups = map[string]string{
+	"jpg": "jpg", "png": "png", "gif": "gif", "heic": "heic",
+	"mp4": "mp4family", "mov": "mp4family", "mkv": "ebml", "avi": "avi",
+}
+
 // correctedName fixes the extension when the content contradicts it. Only
-// still-image extensions are ever touched, and only when the sniffed format
-// is confidently known.
+// known extensions are ever touched, and only when the sniffed format is
+// confidently known and genuinely different (not just a sibling container).
 func correctedName(name string, header []byte) (string, bool) {
 	real := sniffExt(header)
 	if real == "" {
 		return name, false
 	}
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))
-	var current string
-	switch ext {
-	case "jpg", "jpeg":
-		current = "jpg"
-	case "png":
-		current = "png"
-	case "gif":
-		current = "gif"
-	case "heic", "heif":
-		current = "heic"
-	default:
-		return name, false // never touch videos or unknown extensions
+	currentGroup, known := extGroups[ext]
+	if !known {
+		return name, false // never touch extensions we don't understand
 	}
-	if current == real {
+	if currentGroup == sniffGroups[real] {
 		return name, false
 	}
 	return strings.TrimSuffix(name, filepath.Ext(name)) + "." + real, true
