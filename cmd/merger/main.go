@@ -18,7 +18,7 @@ import (
 	"github.com/jonathan/takeout-merger/internal/merge"
 )
 
-const version = "0.2.0"
+const version = "0.2.1"
 
 func main() {
 	log.SetFlags(log.Ltime)

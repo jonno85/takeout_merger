@@ -194,6 +194,15 @@ func (c Config) Resolve(ix *Index, jsonPath string) (mediaPath string, ok bool) 
 
 	exact := strings.ToLower(ApplyDupIndex(jn.MediaName, jn.DupIndex))
 
+	// Old (~2014-era) exports contain sidecars whose media name has NO
+	// extension: "2014-02-13.supplemental-metadata.json" for "2014-02-13.jpg".
+	// When the parsed media name is extensionless, an exact match can't
+	// succeed, so an "<exact>.<ext>" prefix probe is attempted as a fallback.
+	extFallback := ""
+	if filepath.Ext(jn.MediaName) == "" {
+		extFallback = exact + "."
+	}
+
 	// 1. same dir, exact
 	if m := ix.byDir[dir]; m != nil {
 		if p, hit := m[exact]; hit {
@@ -205,6 +214,12 @@ func (c Config) Resolve(ix *Index, jsonPath string) (mediaPath string, ok bool) 
 				return p, true
 			}
 		}
+		// 2b. same dir, extensionless media name
+		if extFallback != "" {
+			if p, hit := prefixMatch(m, extFallback, ""); hit {
+				return p, true
+			}
+		}
 	}
 
 	// 3. global, exact
@@ -212,14 +227,21 @@ func (c Config) Resolve(ix *Index, jsonPath string) (mediaPath string, ok bool) 
 		return ps[0], true
 	}
 
-	// 4. global, truncated prefix
-	if jn.Truncated {
+	// 4. global, truncated prefix / extensionless fallback
+	if jn.Truncated || extFallback != "" {
 		all := map[string]string{}
 		for k, ps := range ix.byName {
 			all[k] = ps[0]
 		}
-		if p, hit := prefixMatch(all, strings.ToLower(jn.MediaName), jn.DupIndex); hit {
-			return p, true
+		if jn.Truncated {
+			if p, hit := prefixMatch(all, strings.ToLower(jn.MediaName), jn.DupIndex); hit {
+				return p, true
+			}
+		}
+		if extFallback != "" {
+			if p, hit := prefixMatch(all, extFallback, ""); hit {
+				return p, true
+			}
 		}
 	}
 

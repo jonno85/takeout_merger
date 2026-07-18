@@ -186,6 +186,30 @@ func TestResolve(t *testing.T) {
 		}
 	})
 
+	t.Run("extensionless sidecar (2014-era exports)", func(t *testing.T) {
+		// Real case from the dry-run log: "2014-02-13.supplemental-metadata.json"
+		// next to media "2014-02-13.jpg" — the sidecar name carries no extension.
+		ix := NewIndex()
+		ix.AddMedia("/t/Photos from 2014/2014-02-13.jpg")
+		ix.AddMedia("/t/Photos from 2014/2014-01-29.jpg")
+		ix.AddMedia("/t/Photos from 2014/2014-01-29(1).jpg")
+
+		p, ok := c.Resolve(ix, "/t/Photos from 2014/2014-02-13.supplemental-metadata.json")
+		if !ok || p != "/t/Photos from 2014/2014-02-13.jpg" {
+			t.Fatalf("got (%q,%v)", p, ok)
+		}
+		// with duplicate index
+		p, ok = c.Resolve(ix, "/t/Photos from 2014/2014-01-29.supplemental-metadata(1).json")
+		if !ok || p != "/t/Photos from 2014/2014-01-29(1).jpg" {
+			t.Fatalf("dup: got (%q,%v)", p, ok)
+		}
+		// plain sidecar must NOT be answered by the numbered media
+		p, ok = c.Resolve(ix, "/t/Photos from 2014/2014-01-29.supplemental-metadata.json")
+		if !ok || p != "/t/Photos from 2014/2014-01-29.jpg" {
+			t.Fatalf("plain: got (%q,%v)", p, ok)
+		}
+	})
+
 	t.Run("no match", func(t *testing.T) {
 		ix := NewIndex()
 		ix.AddMedia("/t/d/OTHER.jpg")
